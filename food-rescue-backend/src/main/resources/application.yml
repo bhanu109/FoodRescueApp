@@ -61,5 +61,11 @@ spring:
     driver-class-name: org.postgresql.Driver
   jpa:
     hibernate:
-      ddl-auto: validate
+      # There is no schema script yet, so 'update' creates the tables on first start.
+      # Override with JPA_DDL_AUTO=validate once the schema exists and is managed separately.
+      ddl-auto: ${JPA_DDL_AUTO:update}
     show-sql: false
+
+# Render (and most hosts) tell the app which port to use through PORT.
+server:
+  port: ${PORT:10000}
