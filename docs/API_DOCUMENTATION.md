@@ -1,0 +1,441 @@
+# Food Rescue Backend - REST API Documentation
+
+Base URL (local dev): `http://localhost:8080/api`
+All request bodies are JSON (`Content-Type: application/json`).
+
+**Status key**
+- ✅ Tested by hand on 6 Oct 2026
+- ◻️ Implemented, but not tested individually
+
+All seven controllers (auth, users, donations, reservations, incidents, notifications, dashboard) were reviewed on 6 Oct 2026, along with `UserService`, `AuthService` and the donation, reservation, incident, notification and analytics services.
+
+---
+
+## Allowed values (use these exactly)
+
+| Field | Values |
+|---|---|
+| `role` | `DONOR`, `RECIPIENT_ORG`, `ADMIN` |
+| `verificationStatus` | `PENDING`, `APPROVED`, `REJECTED` |
+| Donation `category` | `FRESH_PRODUCE`, `BAKERY`, `DAIRY`, `MEAT_AND_SEAFOOD`, `PANTRY_AND_DRY_GOODS`, `PREPARED_MEALS`, `BEVERAGES`, `OTHER` |
+| Donation `status` | `AVAILABLE`, `RESERVED`, `COLLECTED`, `EXPIRED`, `CANCELLED` |
+| Reservation `status` | `PENDING`, `CONFIRMED`, `COLLECTED`, `CANCELLED`, `MISSED` |
+| Incident `severity` | `LOW`, `MEDIUM`, `HIGH` |
+| Incident `status` | `OPEN`, `UNDER_REVIEW`, `RESOLVED` |
+| Notification `type` | `NEW_DONATION_AVAILABLE`, `RESERVATION_CONFIRMED`, `DONATION_EXPIRING_SOON`, `DONATION_COLLECTED`, `RECIPIENT_ORG_VERIFIED`, `INCIDENT_FLAGGED`, `INCIDENT_RESOLVED`, `MISSED_COLLECTION` |
+
+Dates and times are ISO-8601 instants, for example `2026-12-31T18:00:00Z`.
+
+---
+
+## Error responses ✅
+
+Every controller now passes errors to one central handler, so all endpoints return the same JSON shape:
+
+```json
+{
+  "status": 400,
+  "message": "Bad Request",
+  "error": "Only recipient organisations can flag an incident",
+  "timestamp": "2026-10-06T01:31:48.406447800Z",
+  "path": "/api/donations/1/incidents"
+}
+```
+
+`error` holds the explanation and is safe to show to users.
+
+| Situation | Status | `error` text |
+|---|---|---|
+| Missing or invalid field in a request body | 400 | `description: Description is required` |
+| Unknown enum value in a request body (e.g. severity `SEVERE`, which was renamed) | 400 | `The request body is malformed or contains an invalid value, such as an unknown severity or category.` |
+| Invalid value in the URL (e.g. `/donations/status/FOO`) | 400 | `Invalid value 'FOO' for parameter 'status'.` |
+| Required query parameter missing | 400 | `Required parameter 'donorId' is missing.` |
+| Business rule broken | 400 | `Recipient organisation must be approved before making reservations` |
+| Wrong email or password at login | 401 | `Invalid email or password` |
+| Record not found | 404 | `Donation not found with ID: 999` |
+| Unexpected server error | 500 | varies |
+
+Business-rule errors that were checked: reserving as an unapproved recipient, a donor flagging an incident, a duplicate email on user creation, a malformed incident-report date. Not-found checks: unknown donation, incident, user, notification list and dashboard user, all returning `404`. For the user, notification and dashboard cases only the status code was recorded in testing. From the `UserService` source, a duplicate email says `Email already exists: <email>` and an unknown user says `User not found with ID: <id>` (or `... with email: <email>`).
+
+**How 404 is chosen:** a plain error message containing "not found" becomes `404`. Any other deliberate error becomes `400`.
+
+---
+
+## Login (`/api/auth`) ✅
+
+| Method | Path | Purpose |
+|---|---|---|
+| POST | `/api/auth/login` | Check an email and password and return the user |
+
+**Request**
+```json
+{
+  "email": "donor@test.com",
+  "password": "password123"
+}
+```
+Returns `200` with the user, including the role the frontend needs to show the right screens. The password hash is never returned:
+```json
+{
+  "id": 1,
+  "fullName": "Test Donor",
+  "email": "donor@test.com",
+  "role": "DONOR",
+  "organisationName": "Test Cafe",
+  "phoneNumber": null,
+  "address": null,
+  "verificationStatus": null,
+  "createdAt": "2026-10-06T08:57:37.906630Z"
+}
+```
+- A wrong password and an unknown email both return `401` with the same text, `Invalid email or password`, so the response doesn't reveal which accounts exist.
+- A blank email or password returns `400` with a validation message.
+- **There is no token.** The frontend keeps the returned user and sends the user id where an endpoint asks for it. This is a stop-gap for the project, not real security (see Known limitations).
+
+---
+
+## Users (`/api/users`)
+
+| Method | Path | Notes |
+|---|---|---|
+| GET | `/api/users` | ✅ List all users |
+| GET | `/api/users/{id}` | ✅ `404` for an unknown id, `400` for a non-numeric id. Success path ◻️ |
+| GET | `/api/users/email/{email}` | ◻️ |
+| POST | `/api/users` | ✅ Create a user. A duplicate email returns `400` |
+| PUT | `/api/users/{id}` | ✅ Update a user, including verification |
+| DELETE | `/api/users/{id}` | ◻️ |
+| GET | `/api/users/pending-verifications` | ◻️ |
+
+**Create a user**
+```json
+{
+  "fullName": "Test Donor",
+  "email": "donor@test.com",
+  "password": "password123",
+  "role": "DONOR",
+  "organisationName": "Test Cafe",
+  "phoneNumber": "08 1234 5678",
+  "address": "123 Main St"
+}
+```
+Returns `201`. `verificationStatus` is `null` for donors and admins and starts as `PENDING` for `RECIPIENT_ORG`. A duplicate email returns `400`. The API accepts any `role`, including `ADMIN`, so the registration screen should only offer Donor and Recipient organisation.
+
+**Approve a recipient organisation** (required before it can reserve anything)
+```
+PUT /api/users/{id}
+{ "verificationStatus": "APPROVED" }
+```
+The value is `APPROVED`. `VERIFIED` is not valid.
+
+---
+
+## Donations (`/api/donations`) ✅
+
+| Method | Path | Purpose |
+|---|---|---|
+| GET | `/api/donations` | All donations |
+| GET | `/api/donations/{id}` | One donation |
+| GET | `/api/donations/available` | Donations with status `AVAILABLE` |
+| GET | `/api/donations/donor/{donorId}` | One donor's donations |
+| POST | `/api/donations?donorId={id}` | Create a donation |
+| GET | `/api/donations/status/{status}` | Filter by status |
+| PATCH | `/api/donations/{id}/status?status={STATUS}` | Change status |
+| DELETE | `/api/donations/{id}` | Delete (204) |
+
+**Create a donation**
+```json
+{
+  "title": "Fresh Bread",
+  "description": "Surplus loaves from today",
+  "category": "BAKERY",
+  "quantity": 5,
+  "quantityUnit": "kg",
+  "dietaryInfo": "Contains gluten",
+  "storageInfo": "Store at room temperature",
+  "expiryDateTime": "2026-12-31T18:00:00Z",
+  "collectionDeadline": "2026-12-31T17:00:00Z",
+  "pickupAddress": "123 Market St, Adelaide"
+}
+```
+Required: `title`, `category`, `quantity` (positive), `quantityUnit`, `expiryDateTime`, `collectionDeadline`. Returns `201` with `status: "AVAILABLE"`.
+
+**Automatic expiry.** A background job runs every minute (first run 10 seconds after the app starts). It sets any `AVAILABLE` donation to `EXPIRED` once its `collectionDeadline` has passed. Reserved and collected donations are left alone.
+
+---
+
+## Reservations (`/api/reservations`) ✅
+
+| Method | Path | Purpose |
+|---|---|---|
+| GET | `/api/reservations` | All reservations |
+| GET | `/api/reservations/{id}` | One reservation |
+| GET | `/api/reservations/recipient/{recipientOrgId}` | A recipient org's reservations |
+| POST | `/api/reservations?recipientOrgId={id}` | Create a reservation |
+| GET | `/api/reservations/status/{status}` | Filter by status |
+| PATCH | `/api/reservations/{id}/status?status={STATUS}` | Change status |
+| DELETE | `/api/reservations/{id}` | Cancel (204) |
+
+**Create a reservation**
+```json
+{
+  "donationId": 1,
+  "scheduledPickupTime": "2026-12-31T16:00:00Z"
+}
+```
+Returns `201` with `status: "PENDING"`. The request fails with `400` unless all of these hold:
+- the user is a `RECIPIENT_ORG`
+- that org's `verificationStatus` is `APPROVED`
+- the donation's status is `AVAILABLE`
+- the donation has no active reservation (one that isn't `CANCELLED`)
+
+On success the donation's status becomes `RESERVED`.
+
+**Side effects of status changes**
+- Setting a reservation to `COLLECTED` sets the donation to `COLLECTED` and records `collectedAt`.
+- Setting it to `CANCELLED`, or calling DELETE, sets the donation back to `AVAILABLE`.
+
+**Re-reserving after a cancellation works** ✅ (fixed 6 Oct 2026). A donation can have several reservation rows over time, for example a cancelled one followed by a new one, but only one active at a time. The second attempt while one is active should return `400` with "Donation already has an active reservation" (expected from the code, response not yet recorded).
+
+---
+
+## Incidents ✅ (food-safety flagging)
+
+Updated 9 Oct 2026 to match the host organisation's written answers (Aradhika Guha). Added after the host organisation asked for recipient organisations to be able to flag a problem with a donation, and for admins to follow it up.
+
+| Method | Path | Purpose |
+|---|---|---|
+| POST | `/api/donations/{donationId}/incidents?reportedByUserId={id}` | Flag an incident |
+| GET | `/api/donations/{donationId}/incidents` | Incidents for one donation |
+| GET | `/api/incidents` | All incidents, newest first |
+| GET | `/api/incidents/{id}` | One incident (`404` if missing) |
+| GET | `/api/incidents/status/{status}` | Filter by `OPEN`, `UNDER_REVIEW` or `RESOLVED` |
+| PATCH | `/api/incidents/{id}/status?status={STATUS}` | Change status, e.g. to `UNDER_REVIEW` |
+| PATCH | `/api/incidents/{id}/notes` | Add a dated admin note |
+| PATCH | `/api/incidents/{id}/resolve` | Resolve with notes |
+| GET | `/api/incidents/report?from={instant}&to={instant}` | Summary for a date range |
+
+**Severity levels**
+
+| Value | Meaning |
+|---|---|
+| `LOW` | Minor issue, no risk to health |
+| `MEDIUM` | Possible food-safety concern; the food needs to be checked or discarded |
+| `HIGH` | Clear risk to health, or a near miss |
+
+**Flag an incident.** The reporter must have role `RECIPIENT_ORG` and must hold a non-cancelled reservation for that donation. Otherwise `400`: "Only the recipient organisation that reserved or collected this donation can flag an incident".
+```json
+{
+  "description": "Use-by date on the stock did not match what we were told",
+  "severity": "MEDIUM",
+  "reporterRole": "Kitchen manager",
+  "additionalNotes": "Food was discarded before service"
+}
+```
+`description` and `severity` are required. `reporterRole` (max 100) and `additionalNotes` (max 1000) are optional. Returns `201`:
+```json
+{
+  "id": 1,
+  "donationId": 1,
+  "donationTitle": "Fresh Bread",
+  "donationDescription": null,
+  "donorId": 1,
+  "donorName": "Test Donor",
+  "donorOrganisation": "Test Cafe",
+  "reportedById": 2,
+  "reportedByName": "Kitchen Contact",
+  "reportedByOrganisation": "Test Community Kitchen",
+  "reporterRole": "Kitchen manager",
+  "description": "Use-by date on the stock did not match what we were told",
+  "additionalNotes": "Food was discarded before service",
+  "severity": "MEDIUM",
+  "status": "OPEN",
+  "reportedAt": "2026-10-09T01:15:51.374220100Z",
+  "resolvedAt": null,
+  "resolutionNotes": null,
+  "donorFollowUp": null,
+  "adminNotes": null
+}
+```
+
+**Add an admin note** (`PATCH /api/incidents/{id}/notes`)
+```json
+{ "note": "Phoned the donor and left a message" }
+```
+Each note is appended on a new line with today's date (Adelaide), e.g. `[2026-10-09] Phoned the donor...`. Returns `200` with `adminNotes`. A blank note returns `400`. A full notes field (4000 characters) returns `400`.
+
+**Change status** (`PATCH /api/incidents/{id}/status?status=`). Use it for `OPEN` and `UNDER_REVIEW` only. `RESOLVED` returns `400` ("Use the resolve action and enter a resolution note to resolve an incident"). Changing a resolved incident returns `400` ("A resolved incident can't be changed").
+
+**Resolve an incident** (`PATCH /api/incidents/{id}/resolve`)
+```json
+{
+  "resolutionNotes": "Donor advised, item discarded, labelling process reviewed",
+  "resolvedOn": "2026-10-09T00:00:00Z",
+  "donorFollowUp": "Donor will re-check labels each morning"
+}
+```
+`resolutionNotes` is required (blank returns `400`). `resolvedOn` is optional and defaults to now; it can't be in the future or before the incident was reported. `donorFollowUp` is optional. Resolving twice returns `400` ("This incident has already been resolved"). Returns `200` with `status: "RESOLVED"`.
+
+Every incident response includes the donor who supplied the item and the reporting organisation.
+
+**Period report**, e.g. `GET /api/incidents/report?from=2026-01-01T00:00:00Z&to=2026-12-31T23:59:59Z`
+```json
+{
+  "from": "2026-01-01T00:00:00Z",
+  "to": "2026-12-31T23:59:59Z",
+  "totalIncidents": 1,
+  "incidentsBySeverity": { "MEDIUM": 1 },
+  "incidentsByStatus": { "RESOLVED": 1 },
+  "incidents": [ ... ]
+}
+```
+Dates that aren't valid ISO-8601 instants return `400`.
+
+---
+
+## Notifications (`/api/notifications`)
+
+| Method | Path | Notes |
+|---|---|---|
+| GET | `/api/notifications/user/{userId}` | ✅ `404` for an unknown user |
+| GET | `/api/notifications/user/{userId}/unread` | ◻️ |
+| GET | `/api/notifications/{id}` | ◻️ |
+| POST | `/api/notifications?recipientId=&type=&message=&relatedDonationId=` | ✅ `201`. An invalid `type` returns `400` |
+| PATCH | `/api/notifications/{id}/read` | ✅ |
+| PATCH | `/api/notifications/user/{userId}/read-all` | ◻️ |
+| DELETE | `/api/notifications/{id}` | ◻️ |
+
+Notifications are created **automatically** by these events. Each fires once, so repeating the same action doesn't send a duplicate:
+
+| Event | Who is notified | Type |
+|---|---|---|
+| A recipient organisation reserves a donation | The donor who posted it | `RESERVATION_CONFIRMED` |
+| A reservation is marked collected | The donor | `DONATION_COLLECTED` |
+| A recipient organisation flags an incident | Every administrator | `INCIDENT_FLAGGED` |
+| An admin resolves an incident | The organisation that flagged it | `INCIDENT_RESOLVED` |
+| An admin approves a recipient organisation | That organisation | `RECIPIENT_ORG_VERIFIED` |
+| A reserved donation passes its collection deadline without being collected | The recipient (with a warning), the donor, and every administrator | `MISSED_COLLECTION` |
+
+Each notification has a short message (for example `Test Community Kitchen reserved "Fresh Bread" for pickup.`) and, where it applies, a `relatedDonationId`. `NEW_DONATION_AVAILABLE` and `DONATION_EXPIRING_SOON` exist as types, but nothing creates them yet. Any notification can still be created by hand with `POST /api/notifications`. The dashboard's `unreadNotifications` counts these too.
+
+---
+
+## Dashboard (`/api/dashboard`) ✅
+
+### Overall statistics
+`GET /api/dashboard/stats`
+
+```json
+{
+  "totalDonations": 2,
+  "activeDonations": 1,
+  "totalReservations": 2,
+  "completedReservations": 1,
+  "totalUsers": 2,
+  "verifiedRecipients": 1,
+  "pendingVerifications": 0,
+  "donationsByStatus": { "AVAILABLE": 1, "COLLECTED": 1 },
+  "donationsByCategory": { "BAKERY": 1, "FRESH_PRODUCE": 1 },
+  "unreadNotifications": 0,
+  "totalIncidents": 1,
+  "unresolvedIncidents": 0,
+  "incidentsByStatus": { "RESOLVED": 1 },
+  "incidentsBySeverity": { "MEDIUM": 1 }
+}
+```
+`unresolvedIncidents` counts incidents that are `OPEN` or `UNDER_REVIEW`. This is the number an admin needs to follow up.
+
+### User statistics
+`GET /api/dashboard/user/{userId}/stats` returns `200` for a donor and for a recipient org, and `404` for an unknown user. From the source, the fields are:
+- Donor: `totalDonations`, `donationsByStatus`, `totalQuantityDonated`, `unreadNotifications`
+- Recipient org: `totalReservations`, `reservationsByStatus`, `completedReservations`, `totalQuantityReceived`, `unreadNotifications`
+- Admin: `unreadNotifications` only
+
+---
+
+## Missed collections (`/api/missed-collections`) ✅ (added 16 Oct 2026)
+
+A background job runs every 60 seconds. When a donation is still `RESERVED` after its `collectionDeadline` has passed, it:
+
+1. sets the reservation to `MISSED`,
+2. sets the donation to `EXPIRED`,
+3. sends a `MISSED_COLLECTION` notification to the recipient (a warning that repeated misses may lead to suspension), to the donor, and to every admin.
+
+Nothing is suspended automatically. An admin reviews the list and suspends an organisation by hand.
+
+| Method | Endpoint | Notes |
+|---|---|---|
+| GET | `/api/missed-collections` | ✅ `200`. One row per recipient organisation with at least one missed collection, worst first (highest `missedCount`, then most recent). Empty list `[]` when there are none |
+
+Example row:
+```json
+{
+  "recipientId": 2,
+  "recipientName": "Kitchen Contact",
+  "organisationName": "Test Community Kitchen",
+  "email": "kitchen@test.com",
+  "phoneNumber": null,
+  "verificationStatus": "APPROVED",
+  "missedCount": 1,
+  "lastMissedAt": "2026-10-16T04:52:00Z",
+  "missedItems": [
+    { "donationId": 1, "donationTitle": "Missed Collection Test Bread", "collectionDeadline": "2026-10-16T04:52:00Z" }
+  ]
+}
+```
+
+To suspend or reinstate an organisation, use the existing `PUT /api/users/{id}` with `{"verificationStatus": "REJECTED"}` (suspend) or `{"verificationStatus": "APPROVED"}` (reinstate). A `REJECTED` organisation can't reserve.
+
+---
+
+## Known limitations
+
+1. **No real authentication.** Login checks the password but returns no token, and every other endpoint is open (`permitAll`). Anyone can call any endpoint as any user id, and anyone can register as `ADMIN` through `POST /api/users`.
+2. **Incident flagging is limited to the reserving organisation** (changed 9 Oct 2026). The check uses the `reportedByUserId` the caller sends, and with no real authentication that id can be anyone's.
+3. **Data resets on restart.** The dev database is H2 in memory, so everything is wiped each time the app restarts and ids start again from 1.
+
+---
+
+## Running the application
+
+```bash
+mvn spring-boot:run        # run from the folder containing pom.xml
+```
+H2 console: `http://localhost:8080/h2-console`. JDBC URL `jdbc:h2:mem:foodrescue`, user `sa`, blank password.
+
+If Maven fails with `Index 6 out of bounds`, run `mvn clean` and start again.
+
+---
+
+*Incident section updated 9 Oct 2026 and verified with 16 manual tests (N1 to N16) plus a browser walk-through of the frontend. Earlier sections last checked: 7 Oct 2026, from the controller and service source, a 43-request manual test run, five login tests, the incident donor fields and the automatic notifications.*
+
+## Authentication and authorisation
+
+Every endpoint except `POST /api/auth/login` and `POST /api/users` (registration) needs a signed-in user.
+
+**Sign in.** `POST /api/auth/login` with `{ "email", "password" }` returns `{ "token", "tokenType": "Bearer", "expiresInSeconds", "user": { ... } }`. Send the token on every later request: `Authorization: Bearer <token>`. Tokens last 8 hours. A suspended (REJECTED) recipient organisation cannot sign in, and an existing token stops working immediately.
+
+**Registration.** Anyone can register as `DONOR` or `RECIPIENT_ORG`. Registering as `ADMIN` returns 403. The first administrator is created at start-up from `BOOTSTRAP_ADMIN_EMAIL` and `BOOTSTRAP_ADMIN_PASSWORD` (development defaults: `admin@example.test` / `Admin123!`, fake data only).
+
+**Status codes.** 401 = not signed in or token invalid. 403 = signed in but not allowed.
+
+| Area | Who may do it |
+| --- | --- |
+| Browse donations (all, available, by status, by id) | Any signed-in user |
+| Post a donation | Donor, only as themselves (`donorId` must be their own id) |
+| View own donations | The donor, or an administrator |
+| Change status of or delete a donation | The donor who owns it, or an administrator |
+| Reserve a donation | Approved recipient, only as themselves |
+| View, change or cancel a reservation | The recipient who owns it, or an administrator |
+| List all reservations or reservations by status | Administrator |
+| Flag a problem (create an incident) | Recipient, only as themselves, and only for a donation they reserved |
+| View, review, resolve incidents and the incident report | Administrator |
+| Missed collections summary and dashboard statistics | Administrator |
+| Own dashboard statistics and notifications | The user, or an administrator |
+| Create notifications | Administrator |
+| List users, find by email, pending verifications, delete a user | Administrator |
+| View or update own profile | The user (cannot change `verificationStatus`) or an administrator |
+| Approve, reject or suspend an organisation (`verificationStatus`) | Administrator |
+
+**Configuration (environment variables).** `JWT_SECRET` (at least 32 characters; required with the `prod` profile), `CORS_ALLOWED_ORIGINS` (comma-separated frontend addresses), `BOOTSTRAP_ADMIN_EMAIL`, `BOOTSTRAP_ADMIN_PASSWORD`.
+
+**Tests.** `auth-tests.http` has 39 requests with the expected status for each.

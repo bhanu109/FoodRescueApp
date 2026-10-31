@@ -1,0 +1,65 @@
+spring:
+  application:
+    name: food-rescue-backend
+
+  # Default profile is 'dev' so teammates can run the app immediately
+  # with zero setup. Switch to 'prod' once Postgres hosting is configured
+  # (see Budget section of the Assessment 1 proposal - Render/Railway free tier).
+  profiles:
+    active: dev
+
+app:
+  jwt:
+    # Set JWT_SECRET in production (at least 32 characters). The default only works in dev.
+    secret: ${JWT_SECRET:dev-only-secret-change-me-before-deploying-0123456789}
+    expiration-minutes: 480
+  cors:
+    allowed-origins: ${CORS_ALLOWED_ORIGINS:http://localhost:3000,http://localhost:5173}
+  bootstrap-admin:
+    # An ADMIN cannot register publicly. If no admin exists, one is created from these values.
+    # Dev defaults are set in the dev profile below; in production set both environment variables.
+    email: ${BOOTSTRAP_ADMIN_EMAIL:}
+    password: ${BOOTSTRAP_ADMIN_PASSWORD:}
+
+---
+spring:
+  config:
+    activate:
+      on-profile: dev
+  datasource:
+    url: jdbc:h2:mem:foodrescue
+    driver-class-name: org.h2.Driver
+    username: sa
+    password: ""
+  h2:
+    console:
+      enabled: true
+      path: /h2-console
+  jpa:
+    hibernate:
+      ddl-auto: update
+    show-sql: true
+    properties:
+      hibernate:
+        format_sql: true
+
+app:
+  bootstrap-admin:
+    # Fake development admin. Change or remove for any shared or deployed environment.
+    email: ${BOOTSTRAP_ADMIN_EMAIL:admin@example.test}
+    password: ${BOOTSTRAP_ADMIN_PASSWORD:Admin123!}
+
+---
+spring:
+  config:
+    activate:
+      on-profile: prod
+  datasource:
+    url: ${DATABASE_URL}
+    username: ${DATABASE_USERNAME}
+    password: ${DATABASE_PASSWORD}
+    driver-class-name: org.postgresql.Driver
+  jpa:
+    hibernate:
+      ddl-auto: validate
+    show-sql: false
